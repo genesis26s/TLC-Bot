@@ -2,306 +2,182 @@ import discord
 from discord.ext import commands
 from discord import app_commands
 import json
-from datetime import datetime
-from typing import Optional
-import database as db
-import io
+import os
 
-with open("config.json") as f:
-    CONFIG = json.load(f)
+# Define the Ticket configuration structure matching your design
+TICKET_CONFIG = {
+    "embed": {
+        "title": "VRA | Support centre",
+        "description": "Click on the dropdown selection menu below to choose the type of support ticket you would like to open.",
+        "color": "2B2D31",
+        "placeholder": "Select a type of ticket"
+    },
+    "options": {
+        "league_support": {
+            "label": "League support",
+            "desc": "This is if you have any questions about the league or if you need general help",
+            "emoji": "⁉️",
+            "role_id": 112233445566778899,       # Replace with your actual Staff role ID
+            "category_id": 998877665544332211,   # Replace with your actual Category ID
+            "welcome_title": "League Support Ticket Requested",
+            "welcome_msg": "Hello {user}! Thank you for contacting our League Support Team. A support agent representing the League Staff will be with you shortly. Please explain your question or concern in detail."
+        },
+        "player_report": {
+            "label": "Player report",
+            "desc": "This is you would like to report one of our members/players",
+            "emoji": "⚠️",
+            "role_id": 223344556677889900,       # Replace with your actual Staff role ID
+            "category_id": 887766554433221100,   # Replace with your actual Category ID
+            "welcome_title": "Report Filing Panel",
+            "welcome_msg": "Hello {user}! You have requested a player report ticket. To help us process this swiftly, please provide:\n\n1. Username of offender\n2. Detailed description of the violation\n3. Evidence (screenshots/video links)"
+        },
+        "application": {
+            "label": "Application",
+            "desc": "This is if you would like to apply to one of our applications!",
+            "emoji": "💼",
+            "role_id": 334455667788990011,       # Replace with your actual Staff role ID
+            "category_id": 776655443322110011,   # Replace with your actual Category ID
+            "welcome_title": "Application Assessment Channel",
+            "welcome_msg": "Welcome {user}! We are excited to review your submission. Please state which role/application you are applying for and paste your application link or submit your pitch below."
+        },
+        "verification_support": {
+            "label": "Verification support",
+            "desc": "This is if you have a problem with verifying",
+            "emoji": "✅",
+            "role_id": 445566778899001122,       # Replace with your actual Staff role ID
+            "category_id": 665544332211001122,   # Replace with your actual Category ID
+            "welcome_title": "Verification Desk",
+            "welcome_msg": "Hello {user}! If you are having trouble verifying your profile, please provide us with your discord username and a screenshot of any error messages you are receiving."
+        }
+    }
+}
 
-TKT_CFG = CONFIG["tickets"]
-SUCCESS = int(CONFIG["bot"]["success_color"])
-ERROR   = int(CONFIG["bot"]["error_color"])
-PRIMARY = int(CONFIG["bot"]["color"])
-WARNING = int(CONFIG["bot"]["warning_color"])
+class TicketSelect(discord.ui.Select):
+    def __init__(self):
+        options = []
+        # Dynamically build options from config dictionary
+        for key, opt in TICKET_CONFIG["options"].items():
+            options.append(
+                discord.SelectOption(
+                    label=opt["label"],
+                    description=opt["desc"][:100], # Discord limits descriptions to 100 chars
+                    emoji=opt["emoji"],
+                    value=key
+                )
+            )
+        
+        super().__init__(
+            placeholder=TICKET_CONFIG["embed"]["placeholder"],
+            min_values=1,
+            max_values=1,
+            options=options,
+            custom_id="tlc_ticket_select" # CRITICAL: Allows view persistence across bot restarts
+        )
 
+    async def callback(self, interaction: discord.Interaction):
+        selected_value = self.values[0]
+        guild = interaction.guild
+        user = interaction.user
 
-def admin_only():
-    async def predicate(interaction: discord.Interaction):
-        if not interaction.user.guild_permissions.administrator:
-            await interaction.response.send_message(embed=discord.Embed(
-                title="❌ Access Denied", description="Administrator permission required.", color=ERROR
-            ), ephemeral=True)
-            return False
-        return True
-    return app_commands.check(predicate)
+        # Fetch custom data parameters for this selected option
+        ticket_data = TICKET_CONFIG["options"].get(selected_value)
+        if not ticket_data:
+            await interaction.response.send_message("❌ Configuration error for this category.", ephemeral=True)
+            return
+
+        # Defer immediately since creating channels can take more than 3 seconds
+        await interaction.response.defer(ephemeral=True)
+
+        # Get parent category if configured
+        category = guild.get_channel(ticket_data["category_id"]) if ticket_data["category_id"] else None
+
+        # Build dynamic permission overrides
+        overwrites = {
+            guild.default_role: discord.PermissionOverwrite(read_messages=False),
+            user: discord.PermissionOverwrite(read_messages=True, send_messages=True, attach_files=True, embed_links=True),
+            guild.me: discord.PermissionOverwrite(read_messages=True, send_messages=True, manage_channels=True)
+        }
+
+        # Grant explicit view & send permission to staff role if exists
+        staff_role = guild.get_role(ticket_data["role_id"]) if ticket_data["role_id"] else None
+        if staff_role:
+            overwrites[staff_role] = discord.PermissionOverwrite(read_messages=True, send_messages=True, attach_files=True, embed_links=True)
+
+        # Build clean name formatting (e.g., league-support-username)
+        channel_name = f"{selected_value.replace('_', '-')}-{user.name.lower()}"
+
+        try:
+            # Create the ticket text channel
+            ticket_channel = await guild.create_text_channel(
+                name=channel_name,
+                category=category,
+                overwrites=overwrites,
+                reason=f"TLC-Bot Ticket creation: {ticket_data['label']} by {user}"
+            )
+        except discord.Forbidden:
+            await interaction.followup.send("❌ I do not have permissions to manage channels or create tickets.", ephemeral=True)
+            return
+        except Exception as e:
+            await interaction.followup.send(f"❌ Failed to create ticket channel: {str(e)}", ephemeral=True)
+            return
+
+        # Build welcome greeting embed matching the customized aesthetic
+        color_hex = TICKET_CONFIG["embed"]["color"]
+        embed_color = discord.Color.from_str(f"#{color_hex}") if color_hex else discord.Color.blurple()
+        
+        welcome_embed = discord.Embed(
+            title=ticket_data["welcome_title"],
+            description=ticket_data["welcome_msg"].replace("{user}", user.mention),
+            color=embed_color
+        )
+        welcome_embed.set_footer(text=f"TLC-Bot Ticket Support Desk • {user.name}")
+        welcome_embed.set_thumbnail(url=user.display_avatar.url)
+
+        # Mention the user and ping staff role inside channel
+        ping_content = f"{user.mention}"
+        if staff_role:
+            ping_content += f" {staff_role.mention}"
+
+        await ticket_channel.send(content=ping_content, embed=welcome_embed)
+        await interaction.followup.send(f"✅ Ticket created successfully! Go to {ticket_channel.mention}", ephemeral=True)
 
 
 class TicketView(discord.ui.View):
     def __init__(self):
-        super().__init__(timeout=None)
-
-    @discord.ui.button(label="🎫 Open Ticket", style=discord.ButtonStyle.primary, custom_id="open_ticket")
-    async def open_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await TicketSystem.create_ticket_for(interaction)
-
-
-class TicketControlView(discord.ui.View):
-    def __init__(self):
-        super().__init__(timeout=None)
-
-    @discord.ui.button(label="🔒 Close Ticket", style=discord.ButtonStyle.danger, custom_id="close_ticket_btn")
-    async def close_ticket_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        ticket = db.get_ticket_by_channel(interaction.channel.id)
-        if not ticket:
-            return await interaction.response.send_message("This is not a ticket channel.", ephemeral=True)
-        await TicketSystem.do_close_ticket(interaction, ticket)
-
-    @discord.ui.button(label="📋 Claim Ticket", style=discord.ButtonStyle.success, custom_id="claim_ticket_btn")
-    async def claim_ticket_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not interaction.user.guild_permissions.administrator:
-            return await interaction.response.send_message("Staff only.", ephemeral=True)
-        ticket = db.get_ticket_by_channel(interaction.channel.id)
-        if not ticket:
-            return
-        db.claim_ticket(interaction.channel.id, interaction.user.id)
-        await interaction.response.send_message(embed=discord.Embed(
-            title="📋 Ticket Claimed",
-            description=f"{interaction.user.mention} is now handling this ticket.",
-            color=SUCCESS
-        ))
-
-    @discord.ui.button(label="📄 Transcript", style=discord.ButtonStyle.secondary, custom_id="transcript_btn")
-    async def transcript_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not interaction.user.guild_permissions.administrator:
-            return await interaction.response.send_message("Staff only.", ephemeral=True)
-        await interaction.response.defer(ephemeral=True)
-        transcript = await TicketSystem.generate_transcript(interaction.channel)
-        buf = io.BytesIO(transcript.encode("utf-8"))
-        file = discord.File(buf, filename=f"transcript-{interaction.channel.name}.txt")
-        await interaction.followup.send("📄 Transcript generated:", file=file, ephemeral=True)
-
-
-class TicketSystem:
-
-    @staticmethod
-    async def create_ticket_for(interaction: discord.Interaction, subject: str = None):
-        guild  = interaction.guild
-        member = interaction.user
-
-        open_tickets = db.get_user_open_tickets(guild.id, member.id)
-        if len(open_tickets) >= TKT_CFG["max_tickets_per_user"]:
-            return await interaction.response.send_message(embed=discord.Embed(
-                title="❌ Ticket Limit",
-                description=f"You already have an open ticket. Please close it before opening a new one.",
-                color=ERROR
-            ), ephemeral=True)
-
-        settings = db.get_guild_settings(guild.id)
-        category = None
-        if settings and settings.get("ticket_category"):
-            category = guild.get_channel(settings["ticket_category"])
-        if not category:
-            category = discord.utils.get(guild.categories, name=TKT_CFG["category_name"])
-
-        ticket_num = db.get_next_ticket_number(guild.id)
-        channel_name = f"{TKT_CFG['ticket_prefix']}-{str(ticket_num).zfill(4)}"
-
-        overwrites = {
-            guild.default_role: discord.PermissionOverwrite(read_messages=False),
-            member: discord.PermissionOverwrite(read_messages=True, send_messages=True),
-            guild.me: discord.PermissionOverwrite(read_messages=True, send_messages=True, manage_channels=True),
-        }
-        if settings and settings.get("support_role"):
-            support_role = guild.get_role(settings["support_role"])
-            if support_role:
-                overwrites[support_role] = discord.PermissionOverwrite(read_messages=True, send_messages=True)
-
-        ticket_channel = await guild.create_text_channel(
-            channel_name,
-            category=category,
-            overwrites=overwrites,
-            topic=f"Ticket #{ticket_num} | {member} | {subject or 'No subject'}"
-        )
-
-        db.create_ticket(guild.id, ticket_channel.id, member.id, ticket_num, subject)
-
-        embed = discord.Embed(
-            title=f"🎫 Ticket #{str(ticket_num).zfill(4)}",
-            description=(
-                f"Welcome {member.mention}!\n\n"
-                f"Please describe your issue and a staff member will assist you shortly.\n\n"
-                f"{'**Subject:** ' + subject if subject else ''}"
-            ),
-            color=PRIMARY,
-            timestamp=datetime.utcnow()
-        )
-        embed.set_footer(text="TFF Bot • Ticket System")
-        if settings and settings.get("support_role"):
-            support_role = guild.get_role(settings["support_role"])
-            if support_role and TKT_CFG["ping_support_on_open"]:
-                await ticket_channel.send(support_role.mention, embed=embed, view=TicketControlView())
-            else:
-                await ticket_channel.send(embed=embed, view=TicketControlView())
-        else:
-            await ticket_channel.send(embed=embed, view=TicketControlView())
-
-        await interaction.response.send_message(embed=discord.Embed(
-            title="✅ Ticket Created",
-            description=f"Your ticket has been opened: {ticket_channel.mention}",
-            color=SUCCESS
-        ), ephemeral=True)
-
-    @staticmethod
-    async def do_close_ticket(interaction: discord.Interaction, ticket: dict):
-        await interaction.response.defer()
-        channel = interaction.channel
-        guild   = interaction.guild
-
-        transcript = await TicketSystem.generate_transcript(channel)
-        db.close_ticket(channel.id, transcript)
-
-        settings = db.get_guild_settings(guild.id)
-        if settings and settings.get("transcript_channel"):
-            tc = guild.get_channel(settings["transcript_channel"])
-            if tc:
-                buf = io.BytesIO(transcript.encode("utf-8"))
-                f   = discord.File(buf, filename=f"transcript-{channel.name}.txt")
-                opener = guild.get_member(ticket["user_id"])
-                t_embed = discord.Embed(
-                    title=f"📄 Ticket #{str(ticket['ticket_number']).zfill(4)} Closed",
-                    description=f"**Opened by:** {opener.mention if opener else ticket['user_id']}\n**Closed by:** {interaction.user.mention}",
-                    color=WARNING,
-                    timestamp=datetime.utcnow()
-                )
-                t_embed.set_footer(text="TFF Bot • Ticket Transcripts")
-                await tc.send(embed=t_embed, file=f)
-
-        close_embed = discord.Embed(
-            title="🔒 Ticket Closing",
-            description="This ticket will be deleted in 5 seconds.",
-            color=ERROR
-        )
-        await channel.send(embed=close_embed)
-        await discord.utils.sleep_until(datetime.utcnow().__class__.utcnow())
-        import asyncio
-        await asyncio.sleep(5)
-        try:
-            await channel.delete(reason=f"Ticket closed by {interaction.user}")
-        except:
-            pass
-
-    @staticmethod
-    async def generate_transcript(channel: discord.TextChannel) -> str:
-        lines = [f"=== TICKET TRANSCRIPT: #{channel.name} ===", f"Generated: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}", ""]
-        async for message in channel.history(limit=500, oldest_first=True):
-            timestamp = message.created_at.strftime("%Y-%m-%d %H:%M:%S")
-            content   = message.content or "[embed/attachment]"
-            lines.append(f"[{timestamp}] {message.author} ({message.author.id}): {content}")
-        return "\n".join(lines)
+        super().__init__(timeout=None) # Timeout=None makes it completely persistent
+        self.add_item(TicketSelect())
 
 
 class Tickets(commands.Cog):
-    """Advanced Ticket System for TLC Bot."""
-
-    def __init__(self, bot):
+    def __init__(self, bot: commands.Bot):
         self.bot = bot
 
-    # ── /setuptickets ─────────────────────────────────────────────────────────
-    @app_commands.command(name="setuptickets", description="Set up the ticket system with a panel.")
-    @app_commands.describe(channel="Channel to send the ticket panel to")
-    @admin_only()
-    async def setuptickets(self, interaction: discord.Interaction, channel: discord.TextChannel):
-        await interaction.response.defer(ephemeral=True)
-        guild = interaction.guild
+    @commands.Cog.listener()
+    async def on_ready(self):
+        # Re-register views dynamically so buttons/menus continue working on reconnects
+        self.bot.add_view(TicketView())
+        print(f"[{self.__class__.__name__}] Persistent Views Registered.")
 
-        category = discord.utils.get(guild.categories, name=TKT_CFG["category_name"])
-        if not category:
-            category = await guild.create_category(TKT_CFG["category_name"])
-
-        db.upsert_guild_settings(guild.id, ticket_category=category.id)
+    @app_commands.command(name="setup_tickets", description="Post the support center ticket setup embed panel.")
+    @app_commands.checks.has_permissions(administrator=True)
+    async def setup_tickets(self, interaction: discord.Interaction):
+        """Sends the initial interactive ticket setup embed layout to a channel."""
+        embed_data = TICKET_CONFIG["embed"]
+        color_hex = embed_data["color"]
+        embed_color = discord.Color.from_str(f"#{color_hex}") if color_hex else discord.Color.blurple()
 
         embed = discord.Embed(
-            title="🎫 Support Tickets",
-            description=(
-                "Need help? Click the button below to open a support ticket.\n\n"
-                "A staff member will assist you as soon as possible.\n"
-                f"**Max tickets per user:** {TKT_CFG['max_tickets_per_user']}"
-            ),
-            color=PRIMARY,
-            timestamp=datetime.utcnow()
+            title=embed_data["title"],
+            description=embed_data["description"],
+            color=embed_color
         )
-        embed.set_footer(text="TLC Bot • Ticket System")
-        await channel.send(embed=embed, view=TicketView())
-
-        await interaction.followup.send(embed=discord.Embed(
-            title="✅ Tickets Setup",
-            description=f"Ticket panel sent to {channel.mention}.\nTickets category: `{category.name}`",
-            color=SUCCESS
-        ), ephemeral=True)
-
-    # ── /newticket ────────────────────────────────────────────────────────────
-    @app_commands.command(name="newticket", description="Open a new support ticket.")
-    @app_commands.describe(subject="Brief description of your issue")
-    async def newticket(self, interaction: discord.Interaction, subject: Optional[str] = None):
-        await TicketSystem.create_ticket_for(interaction, subject)
-
-    # ── /closeticket ──────────────────────────────────────────────────────────
-    @app_commands.command(name="closeticket", description="Close this ticket.")
-    @admin_only()
-    async def closeticket(self, interaction: discord.Interaction):
-        ticket = db.get_ticket_by_channel(interaction.channel.id)
-        if not ticket:
-            return await interaction.response.send_message(embed=discord.Embed(
-                title="❌ Not a Ticket", description="This command can only be used in a ticket channel.", color=ERROR
-            ), ephemeral=True)
-        await TicketSystem.do_close_ticket(interaction, ticket)
-
-    # ── /adduser ──────────────────────────────────────────────────────────────
-    @app_commands.command(name="adduser", description="Add a user to this ticket.")
-    @app_commands.describe(member="Member to add")
-    @admin_only()
-    async def adduser(self, interaction: discord.Interaction, member: discord.Member):
-        ticket = db.get_ticket_by_channel(interaction.channel.id)
-        if not ticket:
-            return await interaction.response.send_message("Not a ticket channel.", ephemeral=True)
-        await interaction.channel.set_permissions(member, read_messages=True, send_messages=True)
-        await interaction.response.send_message(embed=discord.Embed(
-            title="➕ User Added",
-            description=f"{member.mention} has been added to this ticket.",
-            color=SUCCESS
-        ))
-
-    # ── /removeuser ───────────────────────────────────────────────────────────
-    @app_commands.command(name="removeuser", description="Remove a user from this ticket.")
-    @app_commands.describe(member="Member to remove")
-    @admin_only()
-    async def removeuser(self, interaction: discord.Interaction, member: discord.Member):
-        ticket = db.get_ticket_by_channel(interaction.channel.id)
-        if not ticket:
-            return await interaction.response.send_message("Not a ticket channel.", ephemeral=True)
-        await interaction.channel.set_permissions(member, overwrite=None)
-        await interaction.response.send_message(embed=discord.Embed(
-            title="➖ User Removed",
-            description=f"{member.mention} has been removed from this ticket.",
-            color=WARNING
-        ))
-
-    # ── /settranscriptchannel ─────────────────────────────────────────────────
-    @app_commands.command(name="settranscriptchannel", description="Set the channel for ticket transcripts.")
-    @app_commands.describe(channel="Transcript channel")
-    @admin_only()
-    async def settranscriptchannel(self, interaction: discord.Interaction, channel: discord.TextChannel):
-        db.upsert_guild_settings(interaction.guild.id, transcript_channel=channel.id)
-        await interaction.response.send_message(embed=discord.Embed(
-            title="✅ Transcript Channel Set",
-            description=f"Ticket transcripts will be sent to {channel.mention}.",
-            color=SUCCESS
-        ), ephemeral=True)
-
-    # ── /setsupportrole ───────────────────────────────────────────────────────
-    @app_commands.command(name="setsupportrole", description="Set the support staff role for tickets.")
-    @app_commands.describe(role="The support role")
-    @admin_only()
-    async def setsupportrole(self, interaction: discord.Interaction, role: discord.Role):
-        db.upsert_guild_settings(interaction.guild.id, support_role=role.id)
-        await interaction.response.send_message(embed=discord.Embed(
-            title="✅ Support Role Set",
-            description=f"{role.mention} will be pinged and added to all new tickets.",
-            color=SUCCESS
-        ), ephemeral=True)
+        
+        view = TicketView()
+        
+        # We answer the interaction ephemerally first to avoid "Interaction Failed" errors
+        await interaction.response.send_message("Creating support ticket panel setup...", ephemeral=True)
+        await interaction.channel.send(embed=embed, view=view)
 
 
-async def setup(bot):
+async def setup(bot: commands.Bot):
     await bot.add_cog(Tickets(bot))
