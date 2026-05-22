@@ -10,7 +10,7 @@ CONFIG_FILE = "ticket_config.json"
 # Default configuration mirroring your screenshot design
 DEFAULT_CONFIG = {
     "embed": {
-        "title": "VRA | Support centre",
+        "title": "TLC| Support centre",
         "description": "Click on the dropdown selection menu below to choose the type of support ticket you would like to open.",
         "color": "2B2D31",
         "placeholder": "Select a type of ticket"
