@@ -64,6 +64,20 @@ class VerificationDatabase:
                     detected_at TEXT NOT NULL
                 )
             """)
+
+            # Verification Audit Records Table
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS verification_records (
+                    discord_id TEXT PRIMARY KEY,
+                    guild_id TEXT NOT NULL,
+                    roblox_id TEXT NOT NULL,
+                    roblox_username TEXT NOT NULL,
+                    fingerprint_hash TEXT NOT NULL,
+                    client_ip TEXT NOT NULL,
+                    risk_score INTEGER NOT NULL DEFAULT 0,
+                    verified_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
             conn.commit()
 
     def get_config(self, guild_id: int) -> Optional[GuildVerificationConfig]:
@@ -151,3 +165,36 @@ class VerificationDatabase:
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """, (discord_id, roblox_user, roblox_id, ip, hash_val, risk, 1 if is_vpn else 0, now_iso))
             conn.commit()
+
+    def save_verification_record(
+        self, discord_id: str, guild_id: str, roblox_id: str, roblox_username: str, fingerprint_hash: str, client_ip: str, risk_score: int
+    ):
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT OR REPLACE INTO verification_records 
+                (discord_id, guild_id, roblox_id, roblox_username, fingerprint_hash, client_ip, risk_score, verified_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            """, (discord_id, guild_id, roblox_id, roblox_username, fingerprint_hash, client_ip, risk_score))
+            conn.commit()
+
+    def get_verification_record(self, discord_id: str) -> Optional[Dict[str, Any]]:
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM verification_records WHERE discord_id = ?", (discord_id,))
+            row = cursor.fetchone()
+            return dict(row) if row else None
+
+    def get_verification_by_roblox_id(self, roblox_id: str) -> Optional[Dict[str, Any]]:
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM verification_records WHERE roblox_id = ?", (str(roblox_id),))
+            row = cursor.fetchone()
+            return dict(row) if row else None
+
+    def get_verification_by_fingerprint(self, fingerprint_hash: str) -> Optional[Dict[str, Any]]:
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM verification_records WHERE fingerprint_hash = ?", (fingerprint_hash,))
+            row = cursor.fetchone()
+            return dict(row) if row else None
