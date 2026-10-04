@@ -39,7 +39,7 @@ class VerificationPipelineEngine:
         if matched_alt_discord_id and matched_alt_discord_id != member.id:
             self.db.record_alt_linkage(matched_alt_discord_id, member.id, "Hardware Browser Fingerprint Match")
             telemetry.flags.append(f"Matched hardware fingerprint with user: <@{matched_alt_discord_id}>")
-            return False, f"Layer 2 Denied: Alt account detected via hardware fingerprint.", telemetry
+            return False, "Layer 2 Denied: Alt account detected via hardware fingerprint.", telemetry
 
         # ── LAYER 3: REAL-TIME THREAT & ANTI-VPN SCREENING ───────────────────
         is_vpn, threat_risk, vpn_details = await ThreatIntelEngine.check_ip(ip_address)
@@ -83,6 +83,16 @@ class VerificationPipelineEngine:
             hash_val=browser_hash,
             risk=telemetry.risk_score,
             is_vpn=telemetry.is_vpn
+        )
+
+        self.db.save_verification_record(
+            discord_id=str(member.id),
+            guild_id=str(member.guild.id),
+            roblox_id=str(telemetry.roblox_id),
+            roblox_username=telemetry.roblox_username,
+            fingerprint_hash=browser_hash,
+            client_ip=ip_address,
+            risk_score=telemetry.risk_score
         )
 
         return True, "All Security Layers Cleared Successfully.", telemetry
